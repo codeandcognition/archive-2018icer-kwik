@@ -1,0 +1,906 @@
+---
+title: "Transfer Student Data Analysis"
+output: html_notebook
+---
+
+Harrison Kwik & Benjamin Xie
+{hkwik, bxie}@UW.edu
+
+```{r}
+library(dplyr) # data cleaning
+library(plyr) # revalue
+library(ggplot2) # plotting
+library(coin) # nonparametric t test 
+library(reshape2) # data manipulation (melt)
+library(tidyr) # spread (long to wide table)
+library(stringr) #str_wrap
+# library(Cairo) # CairoPDF
+
+library(extrafont) #NOT using
+# font_import()
+loadfonts()
+loadfonts(device="postscript")
+FONT_USED = "Linux Libertine Display"
+# FONT_USED = "Garamond"
+par(family = FONT_USED)
+```
+
+
+```{r}
+df <- read.csv("transfers_data.csv", na.strings=c("","NA"))
+
+duplicate_emails <- df[duplicated(df$Email.Address),]$Email.Address
+duplicate_data <- df %>% filter(Email.Address %in% duplicate_emails)
+
+# removing duplicates
+df_duplicates <- df[duplicated(df$Email.Address),] # duplicates
+df <- df[!duplicated(df$Email.Address),] # not duplicates
+
+# TODO: join to see if missing data needs to be added back
+# df <- full_join(df, df_duplicates, by = "Email.Address") # just in case duplicate had more info
+
+# check no duplicates
+length(df$Email.Address) == length(unique(df$Email.Address))
+```
+
+# Values to replace survey responses
+```{r}
+background.admitted.uw.native <- c("Freshman Admit", "Robinson Center UW Academy", "After Freshman Year", "Junior Admit")
+background.admitted.uw.transfer <- c("Transfer Student (2-year college/university)", "Transfer Student (4-year college/university)")
+
+background.admitted.cse.native <- c("Regular Admission", "High School Direct Admit") # TODO: What is "Non-Traditional Admission"?
+background.admitted.cse.transfer <- c("Transfer Application")
+
+map.yr <- c("Freshman" = 1, 
+          "Sophomore" = 2, 
+          "Junior" = 3, 
+          "Senior" = 4,
+          "4th/5 years " = 4,
+          "5th year" = 5,
+          "5th year masters" = "ms",
+          "5th years masters" = "ms",
+          "graduated" = "sb",
+          "post-bac" = "sb")
+
+map.intended.degree <- c("Undecided, at minimum a BS" = "Undecided",
+                         "M.D./Ph.D." = "Doctorate (Ph.D. or Ed.D.)",
+                         "Undecided whether to do graduate school." = "Undecided",
+                         "I know at some point a masters, but perhaps PHD." = "Master (MA or MS)")
+
+map.intended.degree.uw <- c("I don't know" = "Undecided",
+                            "BS most likely by maybe masters" = "Bachelor (BA or BS)",
+                            "Don't know yet. BS at the minimum. " = "Undecided")
+
+map.agree <- c("not applicable" = NA,
+               "disagree strongly" = 0,
+               "disagree somewhat" = 1,
+               "neutral" = 1.5, # b/c CRSLRN and CCCRSLRN have neutral for some reason. this may be weird...
+               "agree somewhat" = 2,
+               "agree strongly" = 3)
+
+
+map.agree.short <- c("not applicable" = NA,
+                     "disagree strongly" = 0,
+               "disagree somewhat" = 1,
+               "agree somewhat" = 2,
+               "agree strongly" = 3)
+
+map.freq <- c("not applicable" = NA,
+              "never" = 0,
+              "occasionally" = 1,
+              "often" = 2,
+              "very often" = 3)
+
+map.importance <- c("not applicable" = NA,
+                    "not important" = 0,
+                    "somewhat important" = 1,
+                    "important" = 2,
+                    "very important" = 3)
+
+map.helpful <- c("not applicable" = NA,
+                 "very unhelpful" = 0,
+                 "somewhat unhelpful" = 1,
+                 "somewhat helpful" = 2,
+                 "very helpful" = 3)
+
+map.satisfaction <- c("not applicable" = NA,
+                      "very dissatisfied" = 0,
+                      "dissatisfied" = 1,
+                      "satisfied" = 2,
+                      "very satisfied" = 3)
+
+map.parents.edu <- c( "Elementary school or less" = 0,
+                      "Some High school" = 1,
+                      "High School graduate" = 2,
+                      "Some college" = 3,
+                      "Associate's degree from two year" = 4,
+                      "Bachelor's degree" = 5,
+                      "Some graduate school" = 6,
+                      "Graduate degree" = 7)
+
+BA_NUM <- 5
+
+```
+
+
+# Data cleaning
+```{r}
+df <- df %>% 
+  filter(I.am.over.the.age.of.18 == "Yes") %>% # out w/ the children
+  
+  # determine who transfered into UW
+  mutate(is.uw.transfer = ifelse(What.type.of.student.were.you.when.you.entered.UW. %in% background.admitted.uw.native, FALSE, 
+                              ifelse(What.type.of.student.were.you.when.you.entered.UW. %in% background.admitted.uw.transfer, TRUE, NA))) %>%
+  
+  # student type (b/c tests require factor)
+  mutate(student.type = as.factor(ifelse(is.uw.transfer == TRUE, "transfer",
+                              ifelse(is.uw.transfer == FALSE, "native", NA)))) %>%
+  
+  # yr in school
+  mutate(yr = revalue(What.is.your.current.standing., map.yr)) %>%
+  
+  # intended major
+  mutate(intended_major = revalue(What.is.the.highest.academic.degree.that.you.intend.to.obtain.at.any.college., map.intended.degree)) %>%
+  
+  # intended major at UW
+  mutate(intended_major_uw = revalue(At.University.of.Washington., map.intended.degree.uw)) %>%
+  
+  # convert GPA to numeric
+  mutate(gpa.uw = as.numeric(as.character(What.is.your.UW.GPA.))) %>%
+  
+  # parent's edu
+  mutate(edu.dad = as.numeric(as.character(revalue(What.is.the.highest.level.of.education.completed.by.your.parents...Father., map.parents.edu)))) %>%
+  mutate(edu.mom = as.numeric(as.character(revalue(What.is.the.highest.level.of.education.completed.by.your.parents...Mother., map.parents.edu))))
+
+
+# separate mutation which works on columns created in above mutation
+df <- df %>% mutate(edu.dad.has.ba = edu.dad>=BA_NUM, edu.mom.has.ba = edu.mom>=BA_NUM)
+
+
+df$Gender = as.factor(df$Gender)
+
+
+n.transfer = sum(df$is.uw.transfer==TRUE)
+n.native = sum(df$is.uw.transfer==FALSE)
+paste("Num of native: ", n.native)
+paste("Num of transfers: ", n.transfer)
+```
+
+# Demographic Data
+(Do NOT need to run)
+```{r}
+df_transfer <- df %>% dplyr::filter(is.uw.transfer==TRUE)
+df_native <- df %>% dplyr::filter(is.uw.transfer==FALSE)
+
+# income (not included in table)
+table(df_transfer$What.is.your.best.estimate.of.your.parents..total.household.income.last.year., useNA = "ifany")
+table(df_native$What.is.your.best.estimate.of.your.parents..total.household.income.last.year., useNA = "ifany")
+
+# gender
+table(df_transfer$Gender, useNA= "ifany")
+table(df_native$Gender, useNA= "ifany")
+
+# age
+hist(df_transfer$What.is.your.age.)
+table(df_transfer$What.is.your.age., useNA = "ifany")
+df_transfer %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.<=19)
+df_transfer %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.>=20, What.is.your.age.<=21)
+df_transfer %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.>=22, What.is.your.age.<=23)
+df_transfer %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.>=24, What.is.your.age.<=28)
+df_transfer %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.>=29)
+df_transfer %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(is.na(What.is.your.age.))
+
+table(df_native$What.is.your.age., useNA = "ifany")
+df_native %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.<=19)
+df_native %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.>=20, What.is.your.age.<=21)
+df_native %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.>=22, What.is.your.age.<=23)
+df_native %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(What.is.your.age.>=24)
+df_native %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(is.na(What.is.your.age.))
+# df_native %>% dplyr::select(Email.Address, What.is.your.age.) %>% filter(is.na(What.is.your.age.))
+
+# matriculation
+table(df_native$What.type.of.student.were.you.when.you.entered.UW., useNA = "ifany")
+table(df_transfer$What.type.of.student.were.you.when.you.entered.UW., useNA = "ifany")
+
+# parents edu
+table(df_native %>% select(edu.dad.has.ba, edu.mom.has.ba), useNA = "ifany")
+table(df_transfer %>% select(edu.dad.has.ba, edu.mom.has.ba), useNA = "ifany")
+
+# residence status
+table(df_native$Current.place.of.residence..during.academic.year., useNA = "ifany")
+table(df_transfer$Current.place.of.residence..during.academic.year., useNA = "ifany")
+
+# ethnicity
+table(df_transfer$What.is.your.ethnic.background...you.may.select.more.than.one.answer., useNA = "ifany")
+table(df_native$What.is.your.ethnic.background...you.may.select.more.than.one.answer., useNA = "ifany")
+
+# current standing
+table(df_native$yr, useNA = "ifany")
+table(df_transfer$yr, useNA = "ifany")
+
+# GPA
+summary(df_native$gpa.uw, useNA = "ifany")
+summary(df_transfer$gpa.uw, useNA = "ifany")
+
+ggplot(data = df) + geom_bar(aes(Gender)) + facet_grid(~is.uw.transfer)
+
+count(df$Gender)
+
+# tbl <- tbl_df(df)
+# glimpse(tbl)
+# dcast(melt(df), Gender ~ is.uw.transfer, count)
+```
+
+# Creating Long Table
+Columns: {email, factor, question, response, scale}
+email: subject ID
+- factor: 1 of 20(?) underlying factors
+- question: name of question from L-TSQ relating to a factor
+- response: number representing ordinal response (e.g. "0" corresponds to "never")
+- scale: type of scale used (e.g. freq, agreement). relates to a "map" variable defined above
+```{r}
+df_map <- read.csv("analysis/ltsq_map_2010.csv", na.strings=c("","NA"))
+# View(df_map)
+
+# only getting questions with mapped factors (excluding profile/demographic questions) that apply to both native and transfer students, not dropped (following Appendix B of Laanan et al. 2010)
+# df_map <- df_map %>% filter(!is.na(factor), is.na(drop), factor!="profile", transfer_only==0)
+
+df_map <- df_map %>% filter(!is.na(factor), is.na(drop), factor!="profile") # including all questions
+
+# grab only questions in df_select
+df_select <- df %>% dplyr::select(as.character(df_map$question), is.uw.transfer)
+# df_select <- df_select[sample(nrow(df_select), 30),] # limiting to 30 random respondents. TODO: remove
+# View(df_select)
+
+# df_select_copy <- cbind(df_select)
+# View(df_select_copy)
+
+# super ugly part: revaluing responses
+for(col in names(df_select)) {
+  responses <- tolower(df_select[,col])
+  
+  if(col %in% df_map$question){
+    rtype <- df_map[df_map$question == col,]$response_types
+    
+    # mapping ordinal values to numbers
+    if(rtype == "importance") {
+      df_select[,col] <- revalue(responses, map.importance)
+    }
+    if(rtype == "frequency") {
+      df_select[,col] <- revalue(responses, map.freq)
+    }
+    if(rtype == "helpful") {
+      df_select[,col] <- revalue(responses, map.helpful)
+    }
+    if(rtype == "agree") {
+      df_select[,col] <- revalue(responses, map.agree)
+    }
+    if(rtype == "satisfaction") {
+      df_select[,col] <- revalue(responses, map.satisfaction)
+    }
+  
+  
+  # renaming columns
+    new_cname <-as.character(df_map[df_map$question == col,]$cname)
+    colnames(df_select)[names(df_select) == col] <- new_cname  
+  }
+}
+
+# creating long table
+id_col <- as.character(df_map[df_map$factor=="id",]$cname)
+level_col <- "is.uw.transfer"
+df_long <- reshape2::melt(df_select, id.vars=c(id_col, level_col)) # warning message is b/c levels different: https://stackoverflow.com/a/25689246
+df_long <- df_long %>% dplyr::rename(id = email, question = variable) # "email"" is hard-coded here. should be id_col
+
+# ensuring data is unchanged
+# TODO: ensure melted data is same
+dim(df_long)
+
+# adding factor column
+df_map_merge <- df_map %>% dplyr::select(cname, factor) %>% dplyr::rename(question = cname)
+df_long <- full_join(df_long, df_map_merge, by = "question") 
+
+# adding transfer_only column
+df_map_merge <- unique(df_map %>% dplyr::select(factor, transfer_only) %>% filter(factor!="id"))
+# View(df_map_merge)
+
+# N.B.: DOUBLE COUNTING HERE B/C "STIGMA" AND "SATISFAC" QUESTIONS FOR SOME FACTORS ASKED ONLY TO TRANSFER STUDENTS, SOME TO BOTH. FILTER BY "transfer.only" to prevent double count
+df_long <- full_join(df_long, df_map_merge, by = "factor") 
+df_long <- df_long %>% filter(!is.na(id)) # 1 mostly empty row from "email" 
+
+# View(df_long)
+```
+
+Exploring Data
+Do NOT need to run.
+```{r}
+# View(spread(df_long, question, value))
+# df_long_transfer <- df_long %>% filter(is.uw.transfer==TRUE)
+df_long_transfer <- df_long %>% filter(is.uw.transfer==TRUE, transfer_only==0)
+df_long_native <- df_long %>% filter(is.uw.transfer==FALSE, transfer_only==0)
+
+# View(df_long_transfer)
+
+# # Plots by Student Type
+# ggplot(data = df_long, aes(x = value)) + geom_histogram(aes(fill=is.uw.transfer), stat="count")
+# ggplot(data = df_long_transfer, aes(x = value)) + geom_histogram(stat="count") + ggtitle("Distribution of Transfer Student Responses")
+# ggplot(data = df_long_native, aes(x = value)) + geom_histogram(stat="count") + ggtitle("Distribution of Native Student Responses")
+                                                        
+# Plots by Factor
+# ggplot(data = df_long_select, aes(x = value)) + geom_bar(aes(y = (..count..)/sum(..count..), fill=is.uw.transfer)) + facet_wrap(~factor)
+ggplot(data=subset(df_long_select, !is.na(df_long_select$value)), aes(x = value)) + geom_histogram(stat="count", aes(fill=is.uw.transfer)) + facet_wrap(~factor)
+ggplot(data=subset(df_long_native, !is.na(df_long_native$value)), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~factor) + ggtitle("Distribution of Native Student Responses")
+ggplot(data=subset(df_long_transfer, !is.na(df_long_transfer$value)), aes(x = value)) +  geom_histogram(stat="count") + facet_wrap(~factor) + ggtitle("Distribution of Transfer Student Responses")
+
+# Plots by Question 
+# ggplot(data = df_long, aes(x = value)) + geom_histogram(aes(fill=is.uw.transfer), stat="count") + facet_wrap(~question) + ggtitle("Distribution of Student Responses by Question")
+# ggplot(data = df_long_transfer, aes(x = value)) + geom_histogram(aes(fill=is.uw.transfer), stat="count") + facet_wrap(~question) + ggtitle("Distribution of Transfer Student Responses")
+# ggplot(data = df_long_native, aes(x = value)) + geom_histogram(aes(fill=is.uw.transfer), stat="count") + facet_wrap(~question) + ggtitle("Distribution of Native Student Responses")
+```
+
+# RQ1: Describe Transfer Student Responses
+```{r}
+df_long_transfer_all <- df_long %>% filter(is.uw.transfer==TRUE)
+
+fctr_background <- c("TRANSMOT", "TRANSREA")
+fctr_cc <- c("CCCOURSE", "CCCRSLRN")
+fctr_cap <- c("CCCOUNSL", "CCPERTRA", "CCFACULT", "CCSKILLS")
+fctr_uw <- c("PERUNIV", "PERFAC", "CRSLRN", "FACULTY", "SATISFAC", "STIGMA")
+```
+
+
+Stacked bar plots for frequency of responses for transfer responses
+```{r}
+# Create a stacked bar plot of responses to all questions in a given factor
+## plot_data: dataframe for responses to questions of 1 factor (long data frame w/ ID, question name, value/response), 
+## factor_name: string of name of factor (for title)
+## legend_opts: list of characters for labels of values in legend
+## q_names: human-readable list of questions (for x tick marks)
+# NOTE: number of respondents (25) is hard-coded.
+plot_responses <- function(plot_data, factor_name, legend_opts, q_names = NA, x_label="question", legend_title = "response \noptions", save_plot=FALSE){
+  MAX_WIDTH = 80
+  if(is.na(q_names)){
+    q_names <- sort(unique(plot_data$question))
+  }
+  
+  # wrapping long strings
+  q_names <- str_wrap(q_names, width = MAX_WIDTH/length(q_names)) # wrapping. may need to change width
+  x_label <- str_wrap(x_label, width = MAX_WIDTH)
+  legend_opts <- str_wrap(legend_opts, width = 10)
+  
+  if(save_plot){
+    CairoPDF(file=paste("figures/", factor_name,".pdf", sep = ""), 6, 6, bg="transparent")
+  }
+  
+  ggplot(data = plot_data, aes(x = question, fill = forcats::fct_rev(value))) + 
+    geom_bar(aes(y=(..count..)/25)) +
+    geom_text(aes(label= scales::percent(..count../25), y=(..count..)/25), stat="count", position = position_stack(vjust=0.5)) +
+    scale_fill_grey(start = 0.4, end = 0.9, na.value = "#fcfcfc", name = legend_title, labels = rev(legend_opts)) + # rev() added b/c fill reverses order of values
+    ylab("percentage of transfer student respondents") +
+    xlab(x_label) +
+    scale_y_continuous(labels = scales::percent) + 
+    scale_x_discrete(labels = q_names) +
+    ggtitle(paste("responses to questions about", factor_name)) +
+    theme_minimal() +
+    theme(text=element_text(family=FONT_USED))
+}
+
+save_plots = FALSE # set to false if you don't want plots saved
+
+#Background
+
+# q_labels <- unique(plot_data$question)
+# q_names <- df_map %>% filter(cname %in% q_labels) %>% dplyr::select(question_from_survey)
+# q_names <- q_names$question_from_survey
+# q_names <- c("good academic reputation", "admission to top graduate/professional schools", "get good jobs")
+
+# TRANSMOT
+b1 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_background[1]), 
+               factor_name = "motivations for transfer", 
+               legend_opts = revalue(names(map.importance), c("not applicable" = "NA")),
+               x_label = "How important was each reason in your decision to transfer?",
+               q_names = c("admission to top graduate/professional schools", "get good jobs", "good academic reputation")
+               )
+
+if(save_plots){ggsave("figures/transmot.pdf", b1, device="pdf")}
+
+
+
+# TRANSREA
+b2 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_background[2]), 
+               factor_name = "reasons for transfer", 
+               legend_opts = revalue(names(map.agree.short), c("not applicable" = "NA")),
+               x_label = "How important was each reason in your decision to transfer?",
+               q_names = c("cost of univ", "size of univ"))
+
+if(save_plots){ggsave("figures/transrea.pdf", b2, device="pdf")}
+
+
+# CC
+# CCCOURSE
+c1 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_cc[1]), 
+               factor_name = "experiences w/ general courses at previous institution", 
+               legend_opts = revalue(names(map.agree.short), c("not applicable" = "NA")),
+               x_label = "indicate the extent to which you disagree/agree",
+               q_names = c( "intellectually challening", "developed critical thinking", "extensive reading & writing", "prepared me for being CS major", "prepared me for academic standards at new univ", "demanded intensive writing assignments"))
+
+if(save_plots){ggsave("figures/cccourse.pdf", c1, device="pdf")}
+
+#CCCRSLRN
+c2 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_cc[2]), 
+               factor_name = "previous institution course learning",
+               x_label = "How often did you do each of the following?",
+               legend_opts = revalue(names(map.freq), c("not applicable" = "NA")),
+               q_names = c("participated in discussions", "tried to explain materials to friend", " tried to see how different facts & ideas fit together", "integrated ideas from various sources", "took notes", "thought about practical applications")
+               )
+
+if(save_plots){ggsave("figures/cccrslrn.pdf", c2, device="pdf")}
+
+
+# Transfer Capital
+
+# CC COUNSL
+t1 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_cap[1]), 
+               factor_name = "academic counseling", 
+               legend_opts = revalue(names(map.agree.short), c("not applicable" = "NA")),
+               x_label = "Indicate extent to which you agree/disagree with each statement",
+               q_names = c("consulted about transfer", "information was helpful", "identified courses to meet requirements of new univ", "talked about courses", "met regularly", "discussed transfer plans")
+               )
+
+if(save_plots){ggsave("figures/cccounsl.pdf", t1, device="pdf")}
+
+# CCPERTRA
+t2 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_cap[2]), 
+               factor_name = "perceptions of transfer process", 
+               legend_opts = revalue(names(map.agree.short), c("not applicable" = "NA")),
+               x_label = "Indicate extent to which you agree/disagree with each statement",
+               q_names = c("visited admissions office", "visited campus of new univ", "spoke to counselors at new univ", "researched academic expectations of new univ")
+               )
+
+if(save_plots){ggsave("figures/ccpertra.pdf", t2, device="pdf")}
+
+
+#CCFACULTY
+t3 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_cap[3]), 
+               factor_name = "experiences w/ faculty at prior institution", 
+               legend_opts = revalue(names(map.freq), c("not applicable" = "NA")),
+               x_label = "How often did you do each of the following at your previous college?",
+               q_names = c("discussed career plans w/ faculty", "sought advice on class projects", "asked instructor about course", "visted informally w/ instructor", "asked instructor for comments on my work", "felt comfortable approaching faculty outside class")
+               )
+
+if(save_plots){ggsave("figures/ccfaculty.pdf", t3, device="pdf")}
+
+#CCSKILLS
+t4 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_cap[4]), 
+               factor_name = "learning and study skills", 
+               legend_opts = revalue(names(map.agree), c("not applicable" = "NA")),
+               x_label = "To what extent do you agree that your academic experiences at your previous college gave you the skills needed for new university?",
+               # q_names = NA
+               q_names = c("note taking skills", "problem solving skills", "reading skills", "research skills", "test taking skills", "time management skills", "writing skills")
+               )
+
+if(save_plots){ggsave("figures/ccskills.pdf", t4, device="pdf")}
+
+# UW
+# PERUNIV
+u1 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_uw[1]), 
+               factor_name = "perceptions of university", 
+               legend_opts = revalue(names(map.agree.short), c("not applicable" = "NA")),
+               x_label = "Indicate the extent to which you agree or disagree.",
+               q_names = c("recommend univ to other transfer students", "if could start over, would still go to univ", "univ is intellectually stimulating place")
+               )
+if(save_plots){ggsave("figures/peruniv.pdf", u1, device="pdf")}
+
+
+# PERFAC
+u2 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_uw[2]), 
+               factor_name = "perceptions of faculty", 
+               legend_opts = revalue(names(map.agree.short), c("not applicable" = "NA")),
+               x_label = "Indicate the extent to which you agree or disagree.",
+               q_names = c("faculty are accessible", "faculty are approachable", "professors are interested in academic development of undergrads")
+               )
+if(save_plots){ggsave("figures/perfac.pdf", u2, device="pdf")}
+
+# CRSLRN
+u3 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_uw[3]), 
+               factor_name = "course learning", 
+               legend_opts = revalue(names(map.freq), c("not applicable" = "NA")),
+               x_label = "How often did you do each of the following related to course learning?",
+               q_names = c("participated in discussions", "tried to explain materials to friend", " tried to see how different facts & ideas fit together", "integrated ideas from various sources", "thought about practical applications")               
+               )
+if(save_plots){ggsave("figures/crslrn.pdf", u3, device="pdf")}
+
+
+#FACULTY
+u4 <- plot_responses(plot_data = df_long_transfer_all %>% filter(factor == fctr_uw[4]), 
+               factor_name = "experiences w/ faculty", 
+               legend_opts = revalue(names(map.freq), c("not applicable" = "NA")),
+               x_label = "How often did you do each of the following at your previous college?",
+               q_names = c("discussed career plans w/ faculty", "sought advice on class projects", "asked instructor about course", "visted informally w/ instructor", "asked instructor for comments on my work", "felt comfortable approaching faculty outside class")
+               )
+if(save_plots){ggsave("figures/faculty.pdf", u4, device="pdf")}
+
+
+#SATISFAC
+data_no_duplicates <- unique(df_long_transfer_all %>% filter(factor == fctr_uw[5]) %>% dplyr::select(id, question, value, factor))
+u5 <- plot_responses(plot_data = data_no_duplicates, 
+               factor_name = "satisfaction of university experience", 
+               legend_opts = revalue(names(map.agree.short), c("not applicable" = "NA")),
+               x_label = "Please rate your satisfaction with each of the aspects of campus life listed below.",
+               q_names = c("sens of belonging", "sense of community", 
+                           "decision to transfer to UW", "overall quality of instruction", "overall colleg experience")
+               )
+if(save_plots){ggsave("figures/satisfac.pdf", u5, device="pdf")}
+
+
+# STIGMA
+data_no_duplicates <- unique(df_long_transfer_all %>% filter(factor == fctr_uw[6]) %>% dplyr::select(id, question, value, factor))
+
+u6 <- plot_responses(plot_data = data_no_duplicates, 
+               factor_name = "satisfaction of university experience", 
+               legend_opts = revalue(names(map.agree.short), c("not applicable" = "NA")),
+               x_label = "Please indicate the extent to which you agree or disagree.",
+               q_names = c("Because I am a transfer, faculty tend to underestimate me", "There is a stigma among students for starting at a CC", "Because I am a transfer, students tend to underestimate me")
+               )
+if(save_plots){ggsave("figures/stigma.pdf", u6, device="pdf")}
+
+
+# b1
+# b2
+# c1
+# c2
+# t1
+# t2
+# t3
+# t4
+# u1
+# u2
+# u3
+# u4
+# u5
+# u6
+
+# sandbox
+# plot_data <-  df_long_transfer_all %>% filter(factor == fctr_background[1])
+# legend_title <- "response \noptions"
+# legend_opts <- revalue(names(map.agree.short), c("not applicable" = "NA"))
+# title <- "transfer student responses to transfer motivation questions"
+# q_labels <- unique(plot_data$question)
+# q_names <- df_map %>% filter(cname %in% q_labels) %>% dplyr::select(question_from_survey)
+# q_names <- q_names$question_from_survey
+# q_names <- c("good academic \nreputation", "admission to top graduate/\nprofessional schools", "get good jobs")
+# 
+# x <- ggplot(data = plot_data, aes(x = question, fill = forcats::fct_rev(value))) +
+#   geom_bar(aes(y=(..count..)/25)) +
+#   geom_text(aes(label= scales::percent(..count../25), y=(..count..)/25), stat="count", position = position_stack(vjust=0.5)) +
+#   scale_fill_grey(start = 0.4, end = 0.9, na.value = "#fcfcfc", name = legend_title, labels = legend_opts) +
+#   ylab("percent") +
+#   scale_y_continuous(labels = scales::percent) +
+#   scale_x_discrete(labels = q_names) +
+#   ggtitle(title) +
+#   theme_minimal() + 
+#   theme(text=element_text(family=FONT_USED))
+  
+
+# embed_fonts("figures/test.pdf")
+# ggsave("figures/test.pdf", u6, device="pdf")
+
+```
+
+# selecting all questions that both student types answered
+
+```{r}
+df_long_select <- df_long %>% filter(transfer_only==0)
+
+# reverse coding acaadj.gpa. only needed for comparing factors
+df_long_select_rc <- cbind(df_long_select)
+df_long_select_rc[df_long_select_rc$question=="acaadj.gpa",]$value = 
+  abs(5 - as.numeric(df_long_select_rc[df_long_select_rc$question=="acaadj.gpa",]$value))
+```
+
+
+Which factor is significantly different between student types? 
+```{r}
+# perform post hoc pairwise comparisons
+library(multcomp) # for glht
+library(lsmeans) # for lsm
+
+ggplot(data=df_long_select, aes(x = value)) + geom_histogram(aes(fill=is.uw.transfer), stat="count") + facet_wrap(~factor)
+
+df_long_select_rc$value = as.numeric(df_long_select_rc$value)
+
+uw_factors <- c("CRSLRN", "FACULTY", "PERFAC", "STIGMA", "PERUNIV", "SATISFAC", "ACAADJ", "SOCADJ")
+
+factors.pvalues <- c()
+
+for(fctr in uw_factors) {
+  # browser()
+  fctr <- as.character(fctr)
+  # print(fctr)
+  df_fctr <- df_long_select_rc[df_long_select$factor==fctr,]
+  # test<- df_fctr
+  wtest <- wilcox.test(df_fctr[df_fctr$is.uw.transfer==TRUE,]$value, df_fctr[df_fctr$is.uw.transfer==FALSE,]$value, exact = FALSE)
+  # print(wtest$p.value)
+
+  factors.pvalues <- c(factors.pvalues, wtest$p.value)
+}
+
+factors.pvalues
+uw_factors
+p.adjust(factors.pvalues, method="holm")
+
+df_acaadj <- df_long_select_rc %>% filter(factor == "ACAADJ")
+w_acaadj <- wilcox.test(df_acaadj[df_acaadj$is.uw.transfer==FALSE,]$value, df_acaadj[df_acaadj$is.uw.transfer==TRUE,]$value)
+
+n_native <- nrow(unique(df_acaadj  %>% filter(is.uw.transfer==FALSE, !is.na(value)) %>% dplyr::select(id, is.uw.transfer, question)))
+n_transfer <- nrow(unique(df_acaadj  %>% filter(is.uw.transfer==TRUE, !is.na(value)) %>% dplyr::select(id, is.uw.transfer, question)))
+
+w_acaadj$statistic / (n_native * n_transfer) # 68% chance that a random native student will report an easier academic adjustment process than a random transfer student.
+
+```
+
+## Post-Hoc Analaysis: Which academic adjustment questions are significantly different between student types?
+```{r}
+# all_questions <- unique(df_long_select%>% filter(transfer_only==0) %>% dplyr::select(question))
+all_questions <- unique(df_long_select_rc%>% filter(factor=="ACAADJ") %>% dplyr::select(question))
+
+questions.pvalues <- c()
+
+# wilcox test to compare differences between student types for each type of question
+for(q in all_questions$question) {
+  q <- as.character(q)
+  # print(fctr)
+  df_q <- df_long_select_rc[df_long_select_rc$question==q,]
+  df_q$value <- as.numeric(df_q$value)
+  
+  wtest <- wilcox.test(df_q[df_q$is.uw.transfer==TRUE,]$value, df_q[df_q$is.uw.transfer==FALSE,]$value, exact = FALSE)
+  # print(wtest$p.value)
+  
+  questions.pvalues <- c(questions.pvalues, wtest$p.value)
+}
+
+# adjusting p-values. bye bye significance!
+p.adjust(questions.pvalues, method="holm")
+
+all_questions
+
+# significant (or trending) quesitons
+all_questions$question[1] # p < 0.001 acaadj.easy
+all_questions$question[2] # p <0.0001 acaadj.gpa (I experienced a dip in grades (GPA) during my first semester at UW.)
+
+# post-hoc analysis for acaadj.easy
+df_q1 <- df_long_select_rc[df_long_select_rc$question==all_questions$question[1],]
+wtest_q1 <- wilcox.test(df_q1[df_q1$is.uw.transfer==FALSE,]$value, df_q1[df_q1$is.uw.transfer==TRUE,]$value, exact = FALSE)
+
+wtest_q1$statistic
+n_native <- nrow(unique(df_long_select_rc  %>% filter(is.uw.transfer==FALSE, question == all_questions$question[1], !is.na(value)) %>% dplyr::select(id, is.uw.transfer, question, value)))
+n_transfer <- nrow(unique(df_long_select_rc  %>% filter(is.uw.transfer==TRUE, question == all_questions$question[1], !is.na(value)) %>% dplyr::select(id, is.uw.transfer, question, value)))
+
+wtest_q1$statistic / (n_native * n_transfer) # 69\% chance that random native students feels adjustment to academic standards is easier
+
+# post-hoc analysis for acaadj.gpa
+df_q2 <- df_long_select_rc[df_long_select_rc$question==all_questions$question[2],]
+wtest_q2 <- wilcox.test(df_q2[df_q2$is.uw.transfer==FALSE,]$value, df_q2[df_q2$is.uw.transfer==TRUE,]$value, exact = FALSE)
+wtest_q2$statistic
+
+n_native <- nrow(unique(df_long_select_rc  %>% filter(is.uw.transfer==FALSE, question == all_questions$question[2], !is.na(value)) %>% dplyr::select(id, is.uw.transfer, question, value)))
+n_transfer <- nrow(unique(df_long_select_rc  %>% filter(is.uw.transfer==TRUE, question == all_questions$question[2], !is.na(value)) %>% dplyr::select(id, is.uw.transfer, question, value)))
+
+wtest_q2$statistic / (n_native * n_transfer) # 77% that random transfer student agrees more that their GPA dropped compared to native
+```
+
+Visualizing significant differences (acad.easy)
+```{r}
+df_acaadj <- count(df_long_select %>% filter(factor == "ACAADJ") %>% dplyr::select(is.uw.transfer, question, value))
+# sum(duplicated(df_acaadj)) == 0 # checking for duplicates
+
+df_acaadj <- transform(df_acaadj, prop=round(freq/ave(freq, question, is.uw.transfer, FUN=sum),2)) #getting proportions based on subset of data Rcool
+
+df_acaadj <- df_acaadj %>% mutate(is.uw.transfer.f = factor(is.uw.transfer, levels=c(TRUE, FALSE)))
+
+q_names <- c("acaadj.easy" = str_wrap("Adjusting to academic standards/ expectations has been easy (p<0.001)", width = 40),
+             "acaadj.gpa" = str_wrap("I experienced a dip in grades (GPA) during my first semester (p<0.0001)", width = 40))
+plt_acaadj <- ggplot(data = df_acaadj, aes(x = is.uw.transfer.f, y=prop, fill = forcats::fct_rev(as.factor(value)))) + 
+  geom_bar(stat="identity", color="black", size=0.1) +
+  geom_text(aes(label = scales::percent(prop)), position = position_stack(vjust=0.5), size=4, family=FONT_USED) +
+  scale_fill_gradient(name = "response options", labels = rev(c("NA", "disagree strongly", "disagree somewhat", "agree somewhat", "agree strongly")))+
+  scale_fill_grey(start = 0.4, end = 0.9, na.value = "#fcfcfc", name = "response options", labels = rev(c("NA", "disagree strongly", "disagree somewhat", "agree somewhat", "agree strongly"))) +
+  scale_y_continuous(labels = scales::percent) + 
+  scale_x_discrete(labels = c("transfer", "native")) +
+  ylab("percentage") +
+  theme_minimal() +
+  coord_fixed(ratio=1.5) +
+  facet_wrap(~question, labeller = as_labeller(q_names)) +
+  theme(text=element_text(family=FONT_USED, size =14), 
+        legend.position="bottom", 
+        legend.title=element_blank(), 
+        legend.text = element_text(size=12), 
+        axis.title.x=element_blank(), axis.title.y=element_blank(), strip.text.x = element_text(size = 14))
+
+plt_acaadj
+
+thumbnail <- ggplot(data = df_acaadj %>% filter(question=="acaadj.easy"), aes(x = is.uw.transfer.f, y=prop, fill = forcats::fct_rev(as.factor(value)))) + 
+  geom_bar(stat="identity", color="black", size=0.1) +
+  # geom_text(aes(label = scales::percent(prop)), position = position_stack(vjust=0.5), size=6, family=FONT_USED) +
+  # scale_fill_discrete(name = "response options", labels = rev(c("NA", "disagree strongly", "disagree somewhat", "agree somewhat", "agree strongly")))+
+  # scale_fill_grey(start = 0.4, end = 0.9, na.value = "#fcfcfc", name = "response options", labels = rev(c("NA", "disagree strongly", "disagree somewhat", "agree somewhat", "agree strongly"))) +
+  scale_fill_manual(values=c("#1AC8ED", "#AED4E6", "#AF7595", "#8C2155"), name = "response options", labels = rev(c("NA", "disagree strongly", "disagree somewhat", "agree somewhat", "agree strongly")))+
+  scale_y_continuous(labels = scales::percent) + 
+  scale_x_discrete(labels = c("transfer", "native")) +
+  ylab("percentage") +
+  theme_minimal() +
+  coord_fixed(ratio=1.5) +
+  ggtitle("Adjusting to academic standards has been easy") +
+  # facet_wrap(~question, labeller = as_labeller(q_names)) +
+  theme(text=element_text(family=FONT_USED, size =20), 
+        legend.position="none", 
+        legend.title=element_blank(), 
+        legend.text = element_text(size=14), 
+        axis.title.x=element_blank(), axis.title.y=element_blank(), strip.text.x = element_text(size = 14), axis.text.x = element_text(size=30))
+
+# ggsave("figures/acaadj_compare.pdf", plt_acaadj, device="pdf")
+ggsave("figures/thumbnail.jpeg", thumbnail, dpi = 72, device="jpeg")
+
+```
+
+# Analyzing GPA
+```{r}
+# summary statistics
+ddply(df, ~ student.type, function(data) summary(data$gpa.uw))
+ddply(df, ~ student.type, summarize, gpa.uw.median=median(gpa.uw, na.rm = TRUE), 
+      gpa.uw.iqr=IQR(gpa.uw, na.rm = TRUE))
+
+# Checking Normality
+ggplot(data = df, aes(x = gpa.uw)) + geom_histogram(aes(fill=is.uw.transfer))
+shapiro.test(df[df$is.uw.transfer == 1,]$gpa.uw) # OK
+shapiro.test(df[df$is.uw.transfer == 0,]$gpa.uw) # violates normality assumption. 
+# testing residuals
+m = aov(gpa.uw ~ is.uw.transfer, data=df) # fit model
+shapiro.test(residuals(m)) # test residuals. VIOLATES NORMALITY. Need to use nonparametric test
+qqnorm(residuals(m)); qqline(residuals(m)) # plot residuals
+
+# comparing GPA between native and transfer students (all years) w/ Wilcoxon signed-rank test
+wilcox.gpa <- wilcox.test(gpa.uw ~ student.type, data=df, exact=FALSE) 
+
+df_gpa <- df %>% filter(!is.na(gpa.uw))
+n_native_gpa <- nrow(df_gpa %>% filter(is.uw.transfer==FALSE))
+n_transfer_gpa <- nrow(df_gpa %>% filter(is.uw.transfer==TRUE))
+
+wilcox.gpa$statistic # p < 0.01 => significant difference (native higher)
+# common language effect size (http://core.ecu.edu/psyc/wuenschk/docs30/Nonparametric-EffectSize.pdf)
+# W is same as U in this case: https://stats.stackexchange.com/questions/79843/is-the-w-statistic-output-by-wilcox-test-in-r-the-same-as-the-u-statistic
+wilcox.gpa$statistic / (n_transfer_gpa * n_native_gpa) # 71% of the time the GPA of a native student will exceed the GPA of a transfer student
+
+# confound check: diff in # of quarters in CSE? no sig diff!
+wilcox.test(For.how.many.quarters.have.you.been.a.CSE.major. ~ is.uw.transfer, data = df, exact = FALSE)
+
+# comparing by year
+ggplot(data = df, aes(x = yr, y = gpa.uw)) + geom_violin() + facet_wrap(~ is.uw.transfer) # only yrs 3 and 4 have many values for transfer and native
+# wilcox.test(gpa.uw ~ student.type, data=df[df$yr==4,], exact=FALSE) # n.s. for 4th yr
+
+# GPA for 3rd year
+wtest_gpa3 <- wilcox.test(gpa.uw ~ student.type, data=df[df$yr==3,], exact=FALSE) # p<0.05 for 3rd year
+df_yr3_gpa <- df %>% filter(yr==3, !is.na(gpa.uw))
+n_native_gpa3 <- nrow(df_yr3_gpa %>% filter(is.uw.transfer==FALSE))
+n_transfer_gpa3 <- nrow(df_yr3_gpa %>% filter(is.uw.transfer==TRUE))
+
+wtest_gpa3$statistic / (n_native_gpa3 * n_transfer_gpa3)
+
+df <- df %>% mutate(student.type.f = factor(student.type, levels=c("transfer", "native")))
+
+# comparing by # quarters in CSE. seems to show evidence of transfer shock
+plt_gpa <- ggplot(data = df, aes(x = For.how.many.quarters.have.you.been.a.CSE.major., y = gpa.uw)) + 
+  geom_point(position="jitter") + 
+  scale_size_continuous() +
+  # geom_smooth(method=lm) + 
+  expand_limits(y = 2) + # 2.0 is minimum passing GPA and therefore "0"
+  facet_wrap(~ student.type.f) + 
+  xlab("number of quarters in computer science major") + 
+  ylab("grade point average (GPA)") + 
+  # ggtitle("GPA of students by type") + 
+  # theme_minimal() +
+  theme(text=element_text(family=FONT_USED, size =18),
+        plot.title = element_text(hjust = 0.5),
+        strip.background =element_rect(fill="white")
+        )
+
+plt_gpa
+# ggsave("figures/gpa.pdf", plt_gpa, device="pdf", width = 7, height = 4)
+```
+
+Exploratory: Relationship between SES, ethnicity, and GPA
+```{r}
+View(df %>% dplyr::select(is.uw.transfer, What.is.your.ethnic.background...you.may.select.more.than.one.answer., What.is.your.best.estimate.of.your.parents..total.household.income.last.year., Current.place.of.residence..during.academic.year., What.is.your.UW.GPA.) %>% filter(is.uw.transfer==TRUE))
+```
+
+
+Interaction effect between GPA and quarters in CSE?
+```{r}
+
+```
+
+
+# Difference in course learning from CC to UW
+
+```{r}
+
+```
+
+# Difference in exp w/ faculty from CC to UW
+
+
+# DEPRICATED.
+## Histograms of each factor. DEPRICATED. See stacked bar plots for frequency of responses for transfer responses
+```{r}
+
+# # background
+# # TODO: "Most important reason for attending UW?"
+# ggplot(data = df_long_transfer_all %>% filter(factor %in% fctr_background), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~factor) + ggtitle("Distribution of Background Factors")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_background[1]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for Transfer Motivation (TRANSMOT)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_background[2]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for Transfer Reason (TRANSREA)")
+# 
+# #CC
+# # background
+# ggplot(data = df_long_transfer_all %>% filter(factor %in% fctr_cc), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~factor) + ggtitle("Distribution of CC Factors")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_cc[1]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for CC Experiences w/ General Course (CCCOURSE)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_cc[2]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for CC Course Learning (CCCRSLRN)")
+# 
+# # Transfer Capital
+# ggplot(data = df_long_transfer_all %>% filter(factor %in% fctr_cap), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~factor) + ggtitle("Distribution of Transfer Capital Factors")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_cap[1]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for Capital: Academic Counseling Experiences (CCCOUNSL)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_cap[2]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for Capital: Perceptions of Transfer Process (CCPERTRA)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_cap[3]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for Capital: Experiences w/ CC Faculty (CCFACULT)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_cap[4]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for Capital: Learning & Study Skills (CCSKILLS)")
+# 
+# # UW
+# ggplot(data = df_long_transfer_all %>% filter(factor %in% fctr_uw), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~factor) + ggtitle("Distribution of UW Factors")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_uw[1]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for UW: Perceptions of UW (PERUNIV)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_uw[2]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for UW: Perceptions of UW (PERFAC)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_uw[3]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for UW: Course Learning (CRSLRN)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_uw[4]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for UW: Experiences with Faculty (FACULTY)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_uw[5]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for UW: Satisfaction of UW Env (SATISFAC)")
+# ggplot(data = df_long_transfer_all %>% filter(factor == fctr_uw[6]), aes(x = value)) + geom_histogram(stat="count") + facet_wrap(~question) + ggtitle("Questions for UW: Stigma of Transfer Students (STIGMA)") # DOUBLE COUNTED
+
+```
+
+
+## GLMM (cumulative logit) for ordinal data
+Having column rank deficiency issues (https://stats.stackexchange.com/a/35077)
+Degrees of freedom
+- student type (is.uw.transfer): 1
+- factors (10): 9
+- questions (31): 30
+- responses (5): 4
+- factors x questions: (270)
+
+N = 168 < 270!
+```{r}
+library(ordinal) # for clmm
+library(RVAideMemoire) # for Anova.clmm
+
+df_long_select_rc$id = factor(df_long_select_rc$id)
+df_long_select_rc$factor = factor(df_long_select_rc$factor)
+df_long_select_rc$question = factor(df_long_select_rc$question)
+df_long_select_rc$value = ordered(df_long_select_rc$value)
+
+contrasts(df_long_select_rc$is.uw.transfer) <- "contr.sum"
+contrasts(df_long_select_rc$factor) <- "contr.sum"
+contrasts(df_long_select_rc$question) <- "contr.sum" # not sure if i should encode questions as 1,2,3...
+
+# m = clmm(value ~ (is.uw.transfer * factor) / question + (1 | id), data = df_long_select)
+# m_fac = clmm(value ~ (factor) + (1 | id), data = df_long_select)
+# Anova.clmm(m_fac, type=3) # output says type II but is actually III
+
+# m_trans_fac = clmm(value ~ (is.uw.transfer * factor) + (1|id), data = df_long_select, Hess=TRUE, nAGQ=5)
+m_trans_fac = clmm(value ~ (is.uw.transfer * factor) + (1|id), data = df_long_select_rc)
+Anova.clmm(m_trans_fac, type=3) # output says type II but is actually III
+
+# m_fac_question = clmm(value ~ factor / question + (1|id), data = df_long_select)
+# Anova.clmm(m_fac_question, type=3) # output says type II but is actually III
+
+# m_tfq = clmm(value ~ (is.uw.transfer * factor) / question + (1 | id), data = df_long_select, Hess=TRUE, nAGQ=10)
+# Anova.clmm(m_tfq, type=3) # output says type II but is actually III
+# m_tfq.summary <- summary(m_tfq)
+# m_tfq.summary$coefficients
+# m_tfq.summary$coefficients
+```
